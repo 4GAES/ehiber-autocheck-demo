@@ -55,7 +55,7 @@ jobs:
               "solution_path": ""
             }
         run: |
-          python ./github/tools/auto_evaluator.py
+          python .github/tools/auto_evaluator.py
 
       - name: Crear/actualizar Issue (por SHA)
         env:
