@@ -71,14 +71,21 @@ def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
         raise RuntimeError("❌ Falta KLAUS")
     print("[debug] model:", model)
     print("[debug] body_json:", json.dumps(body, ensure_ascii=False)[:800])
-    req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    body = {"model": model, "messages": messages, "temperature": temperature}
-    data = json.dumps(body).encode("utf-8")
-    with urllib.request.urlopen(req, data, timeout=180) as resp:
-        out = json.loads(resp.read().decode("utf-8", errors="ignore"))
-    return out["choices"][0]["message"]["content"]
+    try:
+        req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
+        
+        req.add_header("Authorization", f"Bearer {api_key}")
+        req.add_header("Content-Type", "application/json")
+        body = {"model": model, "messages": messages, "temperature": temperature}
+        data = json.dumps(body).encode("utf-8")
+        with urllib.request.urlopen(req, data, timeout=180) as resp:
+            out = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        return out["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8", errors="ignore")
+        print(f"[fatal] OpenAI API HTTPError {e.code}: {err_text}", flush=True)
+        raise
+
 
 def generate_effective_rubric_from_yamls(model: str, slug: str, learn_meta: dict, yaml_texts: dict) -> str:
     system = (
