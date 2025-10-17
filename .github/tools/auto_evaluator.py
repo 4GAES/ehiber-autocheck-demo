@@ -66,24 +66,54 @@ def parse_repo(repo_url: str):
 
 
 def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
-    api_key = os.getenv("KLAUS")
+    import urllib.request, json, re
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("KLAUS")
     if not api_key:
-        raise RuntimeError("❌ Falta KLAUS")
-    print("[debug] model:", model)
-    print("[debug] body_json:", json.dumps(body, ensure_ascii=False)[:800])
+        raise RuntimeError("❌ Falta OPENAI_API_KEY o KLAUS")
+
     try:
+        # Limpieza preventiva de contenido
+        clean_msgs = []
+        for m in messages:
+            content = str(m.get("content", "")).encode("utf-8", "ignore").decode("utf-8", "ignore")
+            content = re.sub(r"[\x00-\x1f]+", " ", content)
+            clean_msgs.append({
+                "role": m.get("role", "user"),
+                "content": content
+            })
+
+        body = {
+            "model": model,
+            "messages": clean_msgs,
+            "temperature": float(temperature)
+        }
+
+        # 🔍 Debug antes del envío
+        print("[debug] model:", model)
+        print("[debug] body sample:", json.dumps(body, ensure_ascii=False)[:800], flush=True)
+
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+
         req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
-        
         req.add_header("Authorization", f"Bearer {api_key}")
         req.add_header("Content-Type", "application/json")
-        body = {"model": model, "messages": messages, "temperature": temperature}
-        data = json.dumps(body).encode("utf-8")
+
         with urllib.request.urlopen(req, data, timeout=180) as resp:
-            out = json.loads(resp.read().decode("utf-8", errors="ignore"))
-        return out["choices"][0]["message"]["content"]
+            raw = resp.read().decode("utf-8", errors="ignore")
+            out = json.loads(raw)
+            return out["choices"][0]["message"]["content"]
+
     except urllib.error.HTTPError as e:
-        err_text = e.read().decode("utf-8", errors="ignore")
-        print(f"[fatal] OpenAI API HTTPError {e.code}: {err_text}", flush=True)
+        # Muestra el texto completo de la respuesta HTTP 400/401
+        try:
+            err_text = e.read().decode("utf-8", errors="ignore")
+            print(f"[fatal] OpenAI API HTTPError {e.code}: {err_text}", flush=True)
+        except Exception as inner:
+            print(f"[fatal] OpenAI API HTTPError {e.code} (sin cuerpo): {inner}", flush=True)
+        raise
+
+    except Exception as e:
+        print(f"[fatal] Error general en _openai_chat_llm: {e}", flush=True)
         raise
 
 
