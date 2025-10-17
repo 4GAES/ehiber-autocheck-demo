@@ -17,6 +17,47 @@ Requiere:
 import os, sys, re, glob, json, csv, time, subprocess, statistics, base64, shutil
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
+import yaml, re
+
+def validar_yml(filepath: str) -> bool:
+    """Verifica que el YAML sea legible. Si detecta problemas comunes, intenta corregirlos."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Corrección básica de errores comunes
+        fixed = content
+
+        # Eliminar comillas dobles alrededor de claves como "criterios":
+        fixed = re.sub(r'^\s*"?criterios"?:', "criterios:", fixed, flags=re.MULTILINE)
+        fixed = re.sub(r'^\s*"?estructura"?:', "estructura:", fixed, flags=re.MULTILINE)
+
+        # Eliminar caracteres nulos o BOM invisibles
+        fixed = fixed.replace("\ufeff", "").strip()
+
+        # Validar parseo
+        data = yaml.safe_load(fixed)
+        if not isinstance(data, dict):
+            raise ValueError("Estructura vacía o no dict")
+
+        # Si se reparó algo, se sobreescribe
+        if fixed != content:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(fixed)
+            print(f"[fix] Corrigido formato YAML en {filepath}")
+
+        return True
+
+    except Exception as e:
+        print(f"[fatal] YAML inválido: {filepath} → {e}")
+        # Elimina el archivo roto para evitar cascada de errores
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        return False
+
+
 
 # ---------- YAML loader (auto-instala PyYAML si hace falta) ----------
 def _ensure_yaml():
@@ -334,6 +375,9 @@ def main():
             merged = deep_merge(data, merged)
         Path("rubrica_efectiva.yaml").write_text(yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8")
         log("[ok] rubrica_efectiva.yaml generado")
+        if not validar_yml("rubrica_efectiva.yaml"):
+            log("[fatal] Error al validar rubrica_efectiva.yaml, deteniendo flujo.")
+            sys.exit(3)
 
     # Enforce max_context_bytes desde scoring si se pasa
     merged.setdefault("estructura", {}).setdefault("max_context_bytes", int(scoring.get("max_context_bytes", 120_000)))
