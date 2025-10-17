@@ -72,7 +72,7 @@ def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
         raise RuntimeError("❌ Falta OPENAI_API_KEY o KLAUS")
 
     try:
-        # Limpieza preventiva de contenido
+        # Limpieza preventiva
         clean_msgs = []
         for m in messages:
             content = str(m.get("content", "")).encode("utf-8", "ignore").decode("utf-8", "ignore")
@@ -82,13 +82,11 @@ def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
                 "content": content
             })
 
-        body = {
-            "model": model,
-            "messages": clean_msgs,
-            "temperature": float(temperature)
-        }
+        # Construcción del cuerpo
+        body = {"model": model, "messages": clean_msgs}
+        if not model.startswith("gpt-5-nano"):  # ⚙️ no enviar temperature si es nano
+            body["temperature"] = float(temperature)
 
-        # 🔍 Debug antes del envío
         print("[debug] model:", model)
         print("[debug] body sample:", json.dumps(body, ensure_ascii=False)[:800], flush=True)
 
@@ -104,7 +102,6 @@ def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
             return out["choices"][0]["message"]["content"]
 
     except urllib.error.HTTPError as e:
-        # Muestra el texto completo de la respuesta HTTP 400/401
         try:
             err_text = e.read().decode("utf-8", errors="ignore")
             print(f"[fatal] OpenAI API HTTPError {e.code}: {err_text}", flush=True)
