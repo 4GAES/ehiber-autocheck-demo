@@ -307,11 +307,11 @@ def main():
     log("📝 ISSUE_BODY.md generado")
 
     # (Opcional) publicar issue directo desde Python — dejar comentado
-    # try:
-    #     issue_url = publicar_issue(owner, repo, f"[AutoEval] {slug}", cuerpo)
-    #     log(f"✅ Issue creado: {issue_url}")
-    # except Exception as e:
-    #     log(f"[warn] No se pudo crear Issue desde Python: {e}")
+    try:
+        issue_url = publicar_issue(owner, repo, f"[AutoEval] {slug}", cuerpo)
+        log(f"✅ Issue creado: {issue_url}")
+    except Exception as e:
+        log(f"[warn] No se pudo crear Issue desde Python: {e}")
 
     # Imprimir el cuerpo por consola (útil en logs)
     print(cuerpo)
