@@ -289,6 +289,7 @@ def main():
 {feedback or "- sin observaciones -"}
 """
 
+    # Guardar informe.json (artefacto)
     Path("informe.json").write_text(
         json.dumps({
             "slug": slug,
@@ -299,9 +300,22 @@ def main():
         }, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
-
     log("💾 informe.json guardado")
-    log(cuerpo)
+
+    # 👉 Crear ISSUE_BODY.md para que el paso con gh lo use
+    Path("ISSUE_BODY.md").write_text(cuerpo, encoding="utf-8")
+    log("📝 ISSUE_BODY.md generado")
+
+    # (Opcional) publicar issue directo desde Python — dejar comentado
+    # try:
+    #     issue_url = publicar_issue(owner, repo, f"[AutoEval] {slug}", cuerpo)
+    #     log(f"✅ Issue creado: {issue_url}")
+    # except Exception as e:
+    #     log(f"[warn] No se pudo crear Issue desde Python: {e}")
+
+    # Imprimir el cuerpo por consola (útil en logs)
+    print(cuerpo)
+
 
     # (Opcional) publicar issue si tienes permisos:
     try:
