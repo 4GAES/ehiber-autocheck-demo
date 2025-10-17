@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Post estilo Instagram</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="wrapper">
+    <article class="post" aria-labelledby="post-title-1">
+      <header class="post-header">
+        <div class="avatar" style="background-image:url('https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=200&auto=format&fit=crop')"
+             role="img" aria-label="Avatar de usuario"></div>
+        <div class="user-info">
+          <div id="post-title-1" class="user-name">maria_art</div>
+          <div class="user-meta">Barcelona • Seguido</div>
+        </div>
+        <div class="more" aria-hidden="true">⋯</div>
+      </header>
+
+      <div class="post-media" id="media">
+        <img id="postImage" src="https://images.unsplash.com/photo-1504215680853-026ed2a45def?q=80&w=1200&auto=format&fit=crop" alt="Fotografía del post" draggable="false">
+        <svg class="heart-burst" id="bigHeart" viewBox="0 0 24 24" fill="#ff2d55" aria-hidden="true">
+          <path d="M12 21s-7.5-4.737-9.25-7.053A5.5 5.5 0 0 1 3 7.5 5.5 5.5 0 0 1 8.5 2 6.5 6.5 0 0 1 12 4.09 6.5 6.5 0 0 1 15.5 2 5.5 5.5 0 0 1 21 7.5a5.5 5.5 0 0 1 .25 6.447C19.5 16.263 12 21 12 21z"/>
+        </svg>
+      </div>
+
+      <div class="actions" role="group" aria-label="Acciones del post">
+        <div class="left">
+          <button class="btn" id="likeBtn" aria-pressed="false" title="Me gusta">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.78-.02L12 5.6l-1.02-1.02A5.5 5.5 0 0 0 3.2 4.6C.9 7.04.86 10.86 3.1 13.2L12 21.5l8.9-8.3c2.24-2.34 2.2-6.16-.1-8.6z" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+          <button class="btn" title="Comentar">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+          <button class="btn" title="Compartir">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path><path d="M16 6l-4-4-4 4" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+        </div>
+        <div style="margin-left:auto;">
+          <button class="btn" title="Guardar">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="likes" id="likesCount">1,243 Me gusta</div>
+
+      <div class="caption">
+        <span class="username">maria_art</span>
+        Paseando por la ciudad y encontrando colores inesperados. #ciudad #fotografía
+      </div>
+
+      <div class="comments" id="commentsList">
+        <div><strong>user_j</strong> ¡Increíble toma!</div>
+        <div><strong>ana.p</strong> ¿Dónde es eso?</div>
+      </div>
+
+      <div class="timestamp">Hace 2 horas</div>
+
+      <div class="comment-row" aria-label="Añadir comentario">
+        <input id="commentInput" placeholder="Añade un comentario..." aria-label="Añadir comentario">
+        <button id="postComment" disabled>Publicar</button>
+      </div>
+    </article>
+  </div>
+
+  <script>
+    // ...existing code...
+    const likeBtn = document.getElementById('likeBtn');
+    const likesCount = document.getElementById('likesCount');
+    const postImage = document.getElementById('postImage');
+    const bigHeart = document.getElementById('bigHeart');
+    const commentInput = document.getElementById('commentInput');
+    const postComment = document.getElementById('postComment');
+    const commentsList = document.getElementById('commentsList');
+
+    let liked = false;
+    let likesNumber = 1243;
+
+    function updateLikes(){
+      likesCount.textContent = likesNumber.toLocaleString() + ' Me gusta';
+      likeBtn.setAttribute('aria-pressed', liked ? 'true' : 'false');
+    }
+
+    likeBtn.addEventListener('click', ()=>{
+      liked = !liked;
+      likesNumber += liked ? 1 : -1;
+      updateLikes();
+    });
+
+    let lastTap = 0;
+    postImage.addEventListener('click', (e)=>{
+      const now = Date.now();
+      if (now - lastTap < 300){
+        if (!liked){
+          liked = true;
+          likesNumber++;
+          updateLikes();
+        }
+        bigHeart.classList.add('show');
+        setTimeout(()=> bigHeart.classList.remove('show'), 700);
+      }
+      lastTap = now;
+    });
+
+    commentInput.addEventListener('input', ()=>{
+      postComment.disabled = commentInput.value.trim().length === 0;
+    });
+
+    postComment.addEventListener('click', ()=>{
+      const text = commentInput.value.trim();
+      if (!text) return;
+      const div = document.createElement('div');
+      div.innerHTML = '<strong>tú</strong> ' + escapeHtml(text);
+      commentsList.appendChild(div);
+      commentInput.value = '';
+      postComment.disabled = true;
+    });
+
+    function escapeHtml(s){ return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+    updateLikes();
+  </script>
+</body>
+</html>
