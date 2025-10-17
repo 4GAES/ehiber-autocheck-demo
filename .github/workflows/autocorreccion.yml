@@ -22,7 +22,7 @@ jobs:
       - name: Checkout rubricas
         uses: actions/checkout@v4
         with:
-          repository: ORG/rubricas
+          repository: 4GAES/rubricas
           path: rubricas
           ref: main
           fetch-depth: 1
