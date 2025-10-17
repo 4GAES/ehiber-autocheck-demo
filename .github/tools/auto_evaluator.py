@@ -93,11 +93,11 @@ def deep_merge(a, b):
 # ---------- OpenAI (Chat Completions) ----------
 def openai_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.0) -> str:
     import urllib.request, urllib.error
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Falta OPENAI_API_KEY")
+    klaus = os.getenv("KLAUS")
+    if not klaus:
+        raise RuntimeError("Falta klaus")
     req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
-    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Authorization", f"Bearer {klaus}")
     req.add_header("Content-Type", "application/json")
     body = {
         "model": model,
