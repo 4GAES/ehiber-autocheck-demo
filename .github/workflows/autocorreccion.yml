@@ -40,6 +40,7 @@ jobs:
       - name: Run evaluator (GPT-5 nano)
         env:
           KLAUS: ${{ secrets.KLAUS }}
+          USE_LLM_RUBRIC: "1" 
           # payload: pasa la cadena desde tu backend o edítalo aquí:
           CLIENT_PAYLOAD_JSON: >-
             {
