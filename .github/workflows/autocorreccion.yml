@@ -1,31 +1,29 @@
-name: Autocorrección
+name: Autocorrección (standalone)
 
 on:
   repository_dispatch:
     types: [autocorreccion]
   workflow_dispatch:
-    inputs:
-      slug:          { description: "Slug de proyecto", required: true, type: string }
-      rubrics_ref:   { description: "ref del repo rubricas", required: true, type: string, default: "main" }
-      scoring_type:  { description: "A/B/C/D", required: false, default: "A", type: choice, options: [A,B,C,D] }
 
 permissions:
   contents: read
   issues: write
 
-concurrency:
-  group: ${{ github.repository }}-${{ inputs.slug || github.event.client_payload.slug }}-main
-  cancel-in-progress: true
-
 jobs:
   evaluar:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
     steps:
-      - name: Checkout repo alumno (main)
+      - name: Checkout alumno (main)
         uses: actions/checkout@v4
         with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Checkout rubricas
+        uses: actions/checkout@v4
+        with:
+          repository: ORG/rubricas
+          path: rubricas
           ref: main
           fetch-depth: 1
 
@@ -34,162 +32,46 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Instalar deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install PyYAML rubric-grader
-
-      - name: Checkout repo RÚBRICAS (org/rubricas)
-        uses: actions/checkout@v4
-        with:
-          repository: ORG/rubricas
-          path: rubricas
-          ref: ${{ inputs.rubrics_ref || github.event.client_payload.rubrics_ref }}
-          fetch-depth: 1
-
-      - name: Resolver cadena y fusionar rúbricas
-        run: |
-          python - << 'PY'
-import os, sys, yaml, json, glob, re
-
-payload = json.loads(os.environ.get("CLIENT_PAYLOAD","{}"))
-chain = payload.get("rubrics_chain", [])
-# helper: parse "path@version"
-def parse_ref(s):
-    m = re.match(r"(.+?)@(.*)", s)
-    return (m.group(1), m.group(2)) if m else (s, None)
-
-def pick_version(base, spec):
-    # muy simple: si hay versiones publicadas como path@x.yaml, elige la MÁS ALTA
-    if not spec:
-        cands = sorted(glob.glob(os.path.join("rubricas", base.replace(".yaml","@*.yaml"))))
-        return cands[-1] if cands else os.path.join("rubricas", base)
-    if spec.endswith(".yaml") and not any(ch in spec for ch in "<>="):
-        return os.path.join("rubricas", f"{base.split('@')[0]}@{spec}")
-    cands = sorted(glob.glob(os.path.join("rubricas", base.split('@')[0]+"@*.yaml")))
-    return cands[-1] if cands else None
-
-def deep_merge(a,b):
-    if isinstance(a,dict) and isinstance(b,dict):
-        if b.get("__op")=="replace": return {k:v for k,v in b.items() if k!="__op"}
-        out=dict(a)
-        for k,v in b.items():
-            if k=="__op": continue
-            out[k]=deep_merge(out[k],v) if k in out else v
-        return out
-    if isinstance(a,list) and isinstance(b,list):
-        if all(isinstance(x,dict) and "id" in x for x in a+b):
-            idx={x["id"]:x for x in a}
-            for it in b:
-                if it.get("__op")=="replace":
-                    idx[it["id"]]={k:v for k,v in it.items() if k!="__op"}
-                elif it["id"] in idx:
-                    idx[it["id"]]=deep_merge(idx[it["id"]], it)
-                else:
-                    idx[it["id"]]=it
-            return list(idx.values())
-        return a+b
-    return a
-
-merged={}
-for raw in chain:
-    base, spec = parse_ref(raw)
-    full = pick_version(base, spec)
-    if not full or not os.path.exists(full):
-        print(f"[WARN] Rubrica no encontrada: {raw}")
-        continue
-    data = yaml.safe_load(open(full, encoding="utf-8"))
-    merged = deep_merge(data, merged)
-
-yaml.safe_dump(merged, open("rubrica_efectiva.yaml","w", encoding="utf-8"), sort_keys=False, allow_unicode=True)
-print("rubrica_efectiva.yaml generado")
-PY
-        env:
-          CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
-
-      - name: Escanear repo y crear submissions_dir (agnóstico)
-        run: |
-          python - << 'PY'
-import os, yaml, glob, pathlib, json
-R = yaml.safe_load(open("rubrica_efectiva.yaml", encoding="utf-8"))
-struct = R.get("estructura", {})
-max_total = int(struct.get("max_context_bytes", 120_000))
-picked=[]; used=0
-def add_file(p, maxb):
-    global used
-    if not os.path.isfile(p): return
-    take = min(os.path.getsize(p), maxb, max_total-used)
-    if take<=0: return
-    picked.append((p,take)); used+=take
-
-# defaults si la rubrica no define pick_rules
-rules = struct.get("pick_rules") or [
-  {"globs":["README.md"], "take":1, "max_bytes":20000},
-  {"globs":["**/*.html","**/*.tsx","**/*.jsx"], "take":2, "max_bytes":30000},
-  {"globs":["src/**/*.js","src/**/*.ts","src/**/*.py"], "take":3, "max_bytes":25000},
-  {"globs":["**/*.css","**/*.scss"], "take":1, "max_bytes":10000},
-  {"globs":["**/*.test.*","**/__tests__/**/*"], "take":2, "max_bytes":20000}
-]
-
-for rule in rules:
-    gls=rule.get("globs",[])
-    take=int(rule.get("take",1))
-    m=[]
-    for g in gls: m+=glob.glob(g, recursive=True)
-    m=sorted(set(m), key=lambda p: os.path.getsize(p) if os.path.isfile(p) else 0, reverse=True)
-    for f in m[:take]: add_file(f, int(rule.get("max_bytes", 20000)))
-
-pathlib.Path("submissions").mkdir(exist_ok=True)
-for i,(src,take) in enumerate(picked,1):
-    ext = os.path.splitext(src)[1] or ".txt"
-    dst = f"submissions/student_{i}{ext}"
-    with open(src,"rb") as s, open(dst,"wb") as d: d.write(s.read(take))
-
-meta={"picked_files":[p for p,_ in picked], "bytes":used}
-open("scanner_meta.json","w",encoding="utf-8").write(json.dumps(meta, ensure_ascii=False, indent=2))
-print(meta)
-PY
-
-      - name: Ejecutar rubric-grader
+      - name: Run evaluator (GPT-5 nano)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # payload: pasa la cadena desde tu backend o edítalo aquí:
+          CLIENT_PAYLOAD_JSON: >-
+            {
+              "slug": "instagram-feed-bootstrap",
+              "rubrics_ref": "main",
+              "rubrics_chain": [
+                "modules/intro_web@1.0.0.yaml",
+                "stacks/frontend-js@1.0.0.yaml",
+                "globals/base@1.yaml"
+              ],
+              "scoring": {
+                "type":"A",
+                "ensemble_size":1,
+                "max_context_bytes":250000,
+                "model":"gpt-5-nano"
+              },
+              "problem_path": "",
+              "solution_path": ""
+            }
         run: |
-          STYPE="${{ inputs.scoring_type || github.event.client_payload.scoring.type || 'A' }}"
-          # Podéis parametrizar problem/solution desde la cadena o un default
-          echo "dummy" > problem.txt
-          echo "dummy" > solution.txt
-          rubric-grader rubrica_efectiva.yaml solution.txt problem.txt submissions \
-            --scoring_type "$STYPE" \
-            --output_csv results.csv \
-            --log_file evaluation.log \
-            --model gpt-5-nano
+          python ./github/tools/auto_evaluator.py
 
-      - name: Crear/actualizar Issue (idempotente por slug + main@sha)
+      - name: Crear/actualizar Issue (por SHA)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SHA_SHORT=$(git rev-parse --short HEAD)
-          SLUG="${{ inputs.slug || github.event.client_payload.slug }}"
-          TITLE="[AutoCorrección] $SLUG - main@${SHA_SHORT}"
-          LABELS="autocorreccion,slug:${SLUG},branch:main,sha:${SHA_SHORT}"
-
-          BODY=$(cat <<'MD'
-Resultados adjuntos como artefactos:
-- results.csv
-- evaluation.log
-- scanner_meta.json
-- rubrica_efectiva.yaml
-MD
-)
-          # Si ya existe issue de ESTE SHA → editar; si no, crear uno nuevo
+          TITLE="[AutoCorrección] instagram-feed-bootstrap - main@${SHA_SHORT}"
+          LABELS="autocorreccion,slug:instagram-feed-bootstrap,branch:main,sha:${SHA_SHORT}"
           existing=$(gh issue list --limit 100 --search "$TITLE in:title" --json number --jq '.[0].number' || true)
           if [ -n "$existing" ]; then
-            gh issue edit "$existing" --add-label "$LABELS" --body "$BODY"
+            gh issue edit "$existing" --add-label "$LABELS" --body-file ISSUE_BODY.md
           else
-            # Opcional: cerrar issues anteriores del mismo SLUG en main (otra entrega)
-            old=$(gh issue list --limit 100 --search "[AutoCorrección] $SLUG - main@ in:title" --json number,title --jq '.[] | select(.title != "'"$TITLE"'") | .number')
+            # cerrar issues previos del mismo slug en main
+            old=$(gh issue list --limit 100 --search "[AutoCorrección] instagram-feed-bootstrap - main@ in:title" --json number,title --jq '.[] | select(.title != "'"$TITLE"'") | .number')
             for n in $old; do gh issue close "$n" --comment "Nueva entrega detectada (main@${SHA_SHORT})."; done
-            gh issue create --title "$TITLE" --label "$LABELS" --body "$BODY"
+            gh issue create --title "$TITLE" --label "$LABELS" --body-file ISSUE_BODY.md
           fi
 
       - name: Subir artefactos
@@ -201,3 +83,4 @@ MD
             evaluation.log
             scanner_meta.json
             rubrica_efectiva.yaml
+            ISSUE_BODY.md
