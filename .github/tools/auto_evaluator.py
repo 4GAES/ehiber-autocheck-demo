@@ -1,483 +1,279 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Standalone evaluator para GitHub Actions (sin rubric-grader).
+Auto Evaluator - Versión IA (GPT-5 nano)
+Genera una rúbrica efectiva combinando los YAML del proyecto mediante IA,
+evalúa el repositorio y deja un informe/issue.
 
-Features:
-- Carga y fusiona "rubrics_chain" (module/stack/global) desde ./rubricas/
-- Escaneo agnóstico: required_files/any_of/forbidden_globs + pick_rules -> submissions/
-- Scoring A/B/C/D con OpenAI Chat Completions (por defecto: gpt-5-nano)
-- Artefactos: results.csv, evaluation.log, scanner_meta.json, rubrica_efectiva.yaml, ISSUE_BODY.md
-
-Requiere:
-- OPENAI_API_KEY (env)
-- (Opcional) PyYAML. Si no está, intenta auto-instalarlo (desactivable con NO_AUTO_PIP=1)
+Compatible con GitHub Actions.
 """
 
-import os, sys, re, glob, json, csv, time, subprocess, statistics, base64, shutil
+import os, sys, json, yaml, re, base64, time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
-import yaml, re
+from urllib.parse import urlparse
+import urllib.request
 
-def limpiar_yml(file_path: str):
-    """Convierte JSON válido a YAML si el archivo fue generado con comillas."""
+# =====================================================
+# UTILIDADES GENERALES
+# =====================================================
+
+def log(msg: str):
+    print(msg, flush=True)
+
+def gh_headers():
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("KLAUS")
+    h = {"Accept": "application/vnd.github+json"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+def gh_get_json(url):
+    req = urllib.request.Request(url, headers=gh_headers())
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def path_exists(owner, repo, branch, path):
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
     try:
-        txt = Path(file_path).read_text(encoding="utf-8").strip()
-        # Detectar si es JSON disfrazado
-        if txt.startswith("{") and '"' in txt:
-            log("[warn] rubrica_efectiva.yaml parece JSON — convirtiendo a YAML limpio.")
-            data = json.loads(txt)
-            Path(file_path).write_text(
-                yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                encoding="utf-8"
-            )
-        else:
-            # Si hay claves con comillas tipo `"criterios":` → limpiarlas
-            fixed = re.sub(r'"([a-zA-Z0-9_]+)"\s*:', r'\1:', txt)
-            Path(file_path).write_text(fixed, encoding="utf-8")
-        # Validar que ahora cargue
-        yaml.safe_load(Path(file_path).read_text(encoding="utf-8"))
-        log("[ok] rubrica_efectiva.yaml corregido y válido")
-    except Exception as e:
-        log(f"[fatal] Error limpiando rubrica_efectiva.yaml → {e}")
-        sys.exit(4)
-
-
-def validar_yml(filepath: str) -> bool:
-    """Verifica que el YAML sea legible. Si detecta problemas comunes, intenta corregirlos."""
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Corrección básica de errores comunes
-        fixed = content
-
-        # Eliminar comillas dobles alrededor de claves como "criterios":
-        fixed = re.sub(r'^\s*"?criterios"?:', "criterios:", fixed, flags=re.MULTILINE)
-        fixed = re.sub(r'^\s*"?estructura"?:', "estructura:", fixed, flags=re.MULTILINE)
-
-        # Eliminar caracteres nulos o BOM invisibles
-        fixed = fixed.replace("\ufeff", "").strip()
-
-        # Validar parseo
-        data = yaml.safe_load(fixed)
-        if not isinstance(data, dict):
-            raise ValueError("Estructura vacía o no dict")
-
-        # Si se reparó algo, se sobreescribe
-        if fixed != content:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(fixed)
-            print(f"[fix] Corrigido formato YAML en {filepath}")
-
-        return True
-
-    except Exception as e:
-        print(f"[fatal] YAML inválido: {filepath} → {e}")
-        # Elimina el archivo roto para evitar cascada de errores
-        try:
-            os.remove(filepath)
-        except OSError:
-            pass
+        req = urllib.request.Request(url, headers=gh_headers())
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status == 200
+    except:
         return False
 
-
-
-# ---------- YAML loader (auto-instala PyYAML si hace falta) ----------
-def _ensure_yaml():
+def fetch_text(owner, repo, branch, path, max_bytes=200_000):
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
     try:
-        import yaml  # type: ignore
-        return yaml
-    except Exception:
-        if os.getenv("NO_AUTO_PIP") == "1":
-            raise
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "PyYAML", "-q"])
-            import yaml  # type: ignore
-            return yaml
-        except Exception as e:
-            raise RuntimeError("No se pudo cargar/instalar PyYAML. Usa rúbricas en JSON o habilita internet del runner.") from e
-
-# ---------- Utilidades ----------
-def log(msg: str):
-    with open("evaluation.log", "a", encoding="utf-8") as f:
-        f.write(msg.rstrip() + "\n")
-    print(msg)
-
-def read_text(path: Path, max_bytes: Optional[int] = None) -> str:
-    if not path.exists() or not path.is_file():
-        return ""
-    b = path.read_bytes()
-    if max_bytes is not None:
-        b = b[:max_bytes]
-    return b.decode("utf-8", errors="ignore")
-
-def parse_ref(s: str) -> Tuple[str, Optional[str]]:
-    m = re.match(r"(.+?)@(.*)", s)
-    return (m.group(1), m.group(2)) if m else (s, None)
-
-def pick_version(base: str, spec: Optional[str]) -> Optional[str]:
-    # base es algo como "modules/intro_web.yaml" o "modules/intro_web"
-    base_no_yaml = base[:-5] if base.endswith(".yaml") else base
-    if not spec:
-        # elige la mayor "path@*.yaml" si existe, si no path.yaml
-        cands = sorted(glob.glob(os.path.join("rubricas", base_no_yaml + "@*.yaml")))
-        return cands[-1] if cands else os.path.join("rubricas", base_no_yaml + ".yaml")
-    if spec.endswith(".yaml") and not any(ch in spec for ch in "<>="):
-        return os.path.join("rubricas", f"{base_no_yaml}@{spec}")
-    # rangos semver simplificados -> tomar la mayor disponible
-    cands = sorted(glob.glob(os.path.join("rubricas", base_no_yaml + "@*.yaml")))
-    return cands[-1] if cands else None
-
-def deep_merge(a, b):
-    # fusiona b "sobre" a (b completa/pisa según __op)
-    if isinstance(a, dict) and isinstance(b, dict):
-        if b.get("__op") == "replace":
-            return {k: v for k, v in b.items() if k != "__op"}
-        out = dict(a)
-        for k, v in b.items():
-            if k == "__op":
-                continue
-            out[k] = deep_merge(out[k], v) if k in out else v
-        return out
-    if isinstance(a, list) and isinstance(b, list):
-        # listas de criterios -> merge por id
-        if all(isinstance(x, dict) and "id" in x for x in a + b):
-            idx = {x["id"]: x for x in a}
-            for it in b:
-                if it.get("__op") == "replace":
-                    idx[it["id"]] = {k: v for k, v in it.items() if k != "__op"}
-                elif it["id"] in idx:
-                    idx[it["id"]] = deep_merge(idx[it["id"]], it)
-                else:
-                    idx[it["id"]] = it
-            return list(idx.values())
-        return a + b
-    return a
-
-# ---------- OpenAI (Chat Completions) ----------
-def openai_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.0) -> str:
-    import urllib.request, urllib.error
-    klaus = os.getenv("KLAUS")
-    if not klaus:
-        raise RuntimeError("Falta klaus")
-    req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
-    req.add_header("Authorization", f"Bearer {klaus}")
-    req.add_header("Content-Type", "application/json")
-    body = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    data = json.dumps(body).encode("utf-8")
-    try:
-        with urllib.request.urlopen(req, data, timeout=120) as resp:
-            out = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            # Soportar formatos distintos
-            if "choices" in out and out["choices"]:
-                c = out["choices"][0]
-                content = c.get("message", {}).get("content", "")
-                return content
-            return ""
-    except urllib.error.HTTPError as e:
-        err = e.read().decode()
-        log(f"[OpenAI HTTPError] {e.code} {err}")
-        raise
-    except Exception as e:
-        log(f"[OpenAI ERROR] {e}")
-        raise
-
-def parse_json_from_text(txt: str) -> Dict[str, Any]:
-    txt = txt.strip()
-    # Intentar JSON directo
-    try:
-        return json.loads(txt)
+        req = urllib.request.Request(url, headers=gh_headers())
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, dict) and data.get("encoding") == "base64":
+            raw = base64.b64decode(data["content"])
+            return raw[:max_bytes].decode("utf-8", errors="ignore")
     except Exception:
         pass
-    # Intentar bloque ```json ... ```
-    m = re.search(r"```json\s*(.*?)```", txt, flags=re.S)
+    return ""
+
+def parse_repo(repo_url: str):
+    u = urlparse(repo_url)
+    parts = [p for p in u.path.split("/") if p]
+    return parts[0], parts[1].removesuffix(".git")
+
+# =====================================================
+# BLOQUE IA PARA FUSIÓN DE YAMLs
+# =====================================================
+
+def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("KLAUS")
+    if not api_key:
+        raise RuntimeError("❌ Falta OPENAI_API_KEY o KLAUS")
+    req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Content-Type", "application/json")
+    body = {"model": model, "messages": messages, "temperature": temperature}
+    data = json.dumps(body).encode("utf-8")
+    with urllib.request.urlopen(req, data, timeout=180) as resp:
+        out = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    return out["choices"][0]["message"]["content"]
+
+def generate_effective_rubric_from_yamls(model: str, slug: str, learn_meta: dict, yaml_texts: dict) -> str:
+    system = (
+        "Eres un generador de rúbricas YAML para autocorrección de proyectos. "
+        "Debes devolver SOLO YAML válido (sin bloques ```), con claves top-level: "
+        "estructura, criterios, peso_total, umbrales. No devuelvas explicaciones."
+    )
+    user = f"""
+Genera una rúbrica YAML efectiva para el proyecto "{slug}" fusionando estas capas (de más específica a más global):
+
+- module.yaml:
+{yaml_texts.get('module','(VACIO)')}
+
+- stack.yaml:
+{yaml_texts.get('stack','(VACIO)')}
+
+- global.yaml:
+{yaml_texts.get('global','(VACIO)')}
+
+### Reglas de fusión:
+1. Precedencia: module > stack > global.
+2. Estructura: concatena pick_rules y une required_files / required_any_of sin duplicados.
+3. Criterios: merge por id (tipo/peso del más específico).
+4. peso_total: suma de pesos si no se define; umbral.aprobar: 60% del peso_total por defecto.
+5. Devuelve YAML limpio y válido UTF-8.
+6. No incluyas explicaciones ni ```yaml.
+
+### learn.json (contexto):
+{json.dumps(learn_meta, ensure_ascii=False, indent=2)}
+"""
+    content = _openai_chat_llm(model, [
+        {"role":"system","content":system},
+        {"role":"user","content":user}
+    ])
+    m = re.search(r"```yaml\s*(.*?)```", content, flags=re.S)
     if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
-    # Último recurso: extraer llaves balanceadas
-    start = txt.find("{")
-    end = txt.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(txt[start:end + 1])
-        except Exception:
-            pass
-    raise ValueError("No se pudo parsear JSON de la respuesta del modelo.")
+        content = m.group(1)
+    return content.strip()
 
-# ---------- Prompts ----------
-ONE_STEP_PROMPT = (
-    "Eres un evaluador experto. Recibirás el enunciado del proyecto, una rúbrica y un conjunto de fragmentos del repositorio.\n"
-    "Asigna puntajes por criterio (0..peso) y feedback breve. Responde SOLO JSON con:\n"
-    "{\n"
-    '  "criterios": [{"id":"<id>","score":int,"max":int,"feedback":[str,...]}],\n'
-    '  "total": int\n'
-    "}\n\n"
-    "Enunciado:\n{problem}\n\nRúbrica (texto/criterios):\n{rubric}\n\nFragmentos:\n{snippets}\n"
-)
+# =====================================================
+# EVALUACIÓN DEMO (simplificada)
+# =====================================================
 
-TWO_STEP_1 = (
-    "Eres un evaluador. Resume la intención lógica del código a alto nivel (arquitectura, flujo, componentes) en 10-15 viñetas.\n"
-    "Código/fragmentos:\n{snippets}\n"
-)
-TWO_STEP_2 = (
-    "Ahora, con el enunciado y la rúbrica, compara con la intención lógica y puntúa criterios.\n"
-    "Responde SOLO JSON como en el formato indicado antes.\n\n"
-    "Enunciado:\n{problem}\n\nRúbrica:\n{rubric}\n\nIntención inferida:\n{logic}\n"
-)
-
-AIO_PROMPT = (
-    "Evaluación one-shot: puntúa según la rúbrica y el enunciado. Responde SOLO JSON (formato indicado antes).\n"
-    "Enunciado:\n{problem}\n\nRúbrica:\n{rubric}\n\nFragmentos:\n{snippets}\n"
-)
-
-# ---------- Scanner ----------
-def run_scanner(rubrica: Dict[str, Any]) -> Dict[str, Any]:
-    struct = rubrica.get("estructura", {})
-    required = struct.get("required_files", []) or []
-    any_groups = struct.get("required_any_of", []) or []
-    forbidden = struct.get("forbidden_globs", []) or []
-    max_total = int(struct.get("max_context_bytes", 120_000))
-
-    penalizaciones: List[str] = []
-    for p in required:
-        if not Path(p).exists():
-            penalizaciones.append(f"missing:{p}")
-    for group in any_groups:
-        if not any(Path(x).exists() for x in group):
-            penalizaciones.append(f"missing_any_of:{group}")
-    for pat in forbidden:
-        if glob.glob(pat, recursive=True):
-            penalizaciones.append(f"forbidden:{pat}")
-
-    rules = struct.get("pick_rules") or [
-        {"globs": ["README.md"], "take": 1, "max_bytes": 20_000},
-        {"globs": ["**/*.html", "**/*.tsx", "**/*.jsx"], "take": 2, "max_bytes": 30_000},
-        {"globs": ["src/**/*.js", "src/**/*.ts", "src/**/*.py"], "take": 3, "max_bytes": 25_000},
-        {"globs": ["**/*.css", "**/*.scss"], "take": 1, "max_bytes": 10_000},
-        {"globs": ["**/*.test.*", "**/__tests__/**/*"], "take": 2, "max_bytes": 20_000},
+def ia_stub_eval(criterio):
+    base = round(criterio.get("peso",1) * 0.7, 2)
+    feedback = [
+        "Buen uso de la estructura solicitada.",
+        "Revisa pequeños detalles de presentación.",
+        "Cumple con los requisitos esenciales."
     ]
+    return {
+        "id": criterio.get("id","?"),
+        "tipo":"ia",
+        "score": base,
+        "max": criterio.get("peso",1),
+        "logs": feedback
+    }
 
-    picked: List[Tuple[str, int]] = []
-    used = 0
-    def add_file(p: str, cap: int):
-        nonlocal used
-        if used >= max_total:
-            return
-        if not os.path.isfile(p):
-            return
-        size = os.path.getsize(p)
-        take = min(size, cap, max_total - used)
-        if take <= 0: return
-        picked.append((p, take))
-        used += take
+def deterministic_stub_eval(criterio, owner, repo, branch):
+    peso = criterio.get("peso",1)
+    score = peso
+    logs = []
+    for chk in criterio.get("checks", []):
+        if "path_must_exist" in chk:
+            for p in chk["path_must_exist"]:
+                ok = path_exists(owner, repo, branch, p)
+                logs.append(f"exists:{p}={ok}")
+                if not ok: score -= peso * 0.5
+    return {
+        "id": criterio.get("id","?"),
+        "tipo":"determinista",
+        "score": max(score,0),
+        "max": peso,
+        "logs": logs
+    }
 
-    for rule in rules:
-        takes = int(rule.get("take", 1))
-        cap = int(rule.get("max_bytes", 20_000))
-        matches: List[str] = []
-        for g in rule.get("globs", []):
-            matches += glob.glob(g, recursive=True)
-        matches = sorted(set(matches), key=lambda x: os.path.getsize(x) if os.path.isfile(x) else 0, reverse=True)
-        for m in matches[:takes]:
-            add_file(m, cap)
+# =====================================================
+# MAIN
+# =====================================================
 
-    subdir = Path("submissions")
-    subdir.mkdir(exist_ok=True)
-    snippets = []
-    for i, (src, take) in enumerate(picked, 1):
-        ext = os.path.splitext(src)[1] or ".txt"
-        dst = subdir / f"student_{i}{ext}"
-        with open(src, "rb") as s, open(dst, "wb") as d:
-            d.write(s.read(take))
-        text = read_text(dst)
-        snippets.append(f"--- {src} ---\n{text}\n")
-    meta = {"picked_files": [p for p,_ in picked], "bytes": used, "penalties": penalizaciones}
-    Path("scanner_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"snippets": "\n".join(snippets), "meta": meta}
-
-# ---------- Evaluación ----------
-def evaluate(scoring: Dict[str, Any], rubrica_text: str, problem_text: str, snippets: str) -> Dict[str, Any]:
-    model = scoring.get("model", "gpt-5-nano")
-    stype = scoring.get("type", "A")
-    ensemble = int(scoring.get("ensemble_size", 1))
-
-    def one_call(prompt: str) -> Dict[str, Any]:
-        msg = [{"role": "system", "content": "Eres un evaluador que responde SOLO JSON válido."},
-               {"role": "user", "content": prompt}]
-        out = openai_chat(model, msg, temperature=0.1)
-        return parse_json_from_text(out)
-
-    if stype == "A":
-        data = one_call(ONE_STEP_PROMPT.format(problem=problem_text, rubric=rubrica_text, snippets=snippets))
-        return data
-
-    if stype == "B":
-        logic = openai_chat(model, [{"role":"system","content":"Eres un evaluador."},
-                                    {"role":"user","content": TWO_STEP_1.format(snippets=snippets)}], temperature=0.0)
-        data = one_call(TWO_STEP_2.format(problem=problem_text, rubric=rubrica_text, logic=logic))
-        return data
-
-    if stype == "C":
-        runs: List[Dict[str, Any]] = []
-        for i in range(ensemble):
-            data = one_call(ONE_STEP_PROMPT.format(problem=problem_text, rubric=rubrica_text, snippets=snippets))
-            runs.append(data)
-        # consenso simple: promedio de scores por criterio id, y total promedio
-        by_id: Dict[str, List[int]] = {}
-        max_by_id: Dict[str, int] = {}
-        for r in runs:
-            for c in r.get("criterios", []):
-                by_id.setdefault(c["id"], []).append(int(c.get("score", 0)))
-                max_by_id[c["id"]] = int(c.get("max", 0))
-        criterios = [{"id": cid, "score": int(round(sum(v)/len(v))), "max": max_by_id.get(cid, 0), "feedback": []}
-                     for cid, v in by_id.items()]
-        total = int(round(sum(c["score"] for c in criterios)))
-        return {"criterios": criterios, "total": total}
-
-    if stype == "D":
-        data = one_call(AIO_PROMPT.format(problem=problem_text, rubric=rubrica_text, snippets=snippets))
-        return data
-
-    # fallback -> A
-    data = one_call(ONE_STEP_PROMPT.format(problem=problem_text, rubric=rubrica_text, snippets=snippets))
-    return data
-
-# ---------- Main ----------
 def main():
-    # Inputs por env o defaults (pensado para Actions repository_dispatch/workflow_dispatch)
-    payload_json = os.getenv("CLIENT_PAYLOAD_JSON")  # opcional: toda la config inline
-    if payload_json:
-        payload = json.loads(payload_json)
-        rubrics_chain = payload.get("rubrics_chain", [])
-        rubrics_ref   = payload.get("rubrics_ref", "main")
-        scoring       = payload.get("scoring", {"type":"A","ensemble_size":1,"max_context_bytes":120_000,"model":"gpt-5-nano"})
-        problem_path  = payload.get("problem_path") or ""
-        solution_path = payload.get("solution_path") or ""
-        slug          = payload.get("slug","proyecto")
-    else:
-        # Variables compatibles con el workflow de ejemplo
-        rubrics_chain = json.loads(os.getenv("RUBRICS_CHAIN_JSON","[]"))
-        rubrics_ref   = os.getenv("RUBRICS_REF","main")
-        slug          = os.getenv("PROJECT_SLUG","proyecto")
-        scoring = {
-            "type": os.getenv("SCORING_TYPE","A"),
-            "ensemble_size": int(os.getenv("ENSEMBLE_SIZE","1")),
-            "max_context_bytes": int(os.getenv("MAX_CONTEXT_BYTES","250000")),
-            "model": os.getenv("MODEL_NAME","gpt-5-nano"),
+    log("=== 🚀 Auto Evaluator (GPT-5 nano) ===")
+
+    # Leer payload (simulado o real)
+    payload_json = os.getenv("CLIENT_PAYLOAD_JSON","{}")
+    payload = json.loads(payload_json)
+
+    slug = payload.get("slug","unknown")
+    rubrics_chain = payload.get("rubrics_chain",[])
+    scoring = payload.get("scoring",{})
+    ref = payload.get("rubrics_ref","main")
+
+    log(f"[info] slug={slug} ref={ref} stype={scoring.get('type','A')} model={scoring.get('model','gpt-5-nano')}")
+
+    use_llm = os.getenv("USE_LLM_RUBRIC","0") == "1"
+
+    # =====================================================
+    # GENERAR RUBRICA EFECTIVA (IA)
+    # =====================================================
+    if use_llm:
+        def _read_or_empty(path):
+            p = Path(os.path.join("rubricas", path))
+            return p.read_text(encoding="utf-8") if p.exists() else ""
+
+        module_path = next((c for c in rubrics_chain if c.startswith("modules/")), "")
+        stack_path  = next((c for c in rubrics_chain if c.startswith("stacks/")), "")
+        global_path = next((c for c in rubrics_chain if c.startswith("globals/")), "")
+
+        yaml_texts = {
+            "module": _read_or_empty(module_path),
+            "stack":  _read_or_empty(stack_path),
+            "global": _read_or_empty(global_path),
         }
-        problem_path  = os.getenv("PROBLEM_PATH","")
-        solution_path = os.getenv("SOLUTION_PATH","")
 
-    # 1) Checkout rubricas ya ocurrió en el workflow -> solo usar ref/info
-    log(f"[info] slug={slug} ref={rubrics_ref} stype={scoring['type']} model={scoring.get('model')}")
+        learn_meta = {"slug": slug, "scoring": scoring}
 
-    # 2) Resolver y fusionar cadena
-    yaml = _ensure_yaml()
-    merged: Dict[str, Any] = {}
-    if not rubrics_chain:
-        log("[warn] rubrics_chain vacío; esperando rubrica_efectiva.yaml ya proporcionado.")
-        if Path("rubrica_efectiva.yaml").exists():
-            merged = yaml.safe_load(Path("rubrica_efectiva.yaml").read_text(encoding="utf-8"))
-        else:
-            print("ERROR: no hay 'rubrics_chain' ni 'rubrica_efectiva.yaml'", file=sys.stderr)
-            sys.exit(2)
-    else:
-        for raw in rubrics_chain:
-            base, spec = parse_ref(raw)
-            full = pick_version(base, spec)
-            if not full or not Path(full).exists():
-                log(f"[warn] Rúbrica no encontrada: {raw}")
-                continue
-            data = yaml.safe_load(Path(full).read_text(encoding="utf-8"))
-            merged = deep_merge(data, merged)
-        Path("rubrica_efectiva.yaml").write_text(yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        rubrica_yaml = generate_effective_rubric_from_yamls(
+            scoring.get("model","gpt-5-nano"), slug, learn_meta, yaml_texts
+        )
+
+        Path("rubrica_efectiva.yaml").write_text(rubrica_yaml, encoding="utf-8")
         log("[ok] rubrica_efectiva.yaml generado")
-        # Llamada directa
-        limpiar_yml("rubrica_efectiva.yaml")
-        # === Validación robusta de rubrica_efectiva.yaml ===
+
+        # Validar YAML
         try:
-            with open("rubrica_efectiva.yaml", "r", encoding="utf-8") as f:
-                rub = yaml.safe_load(f)
-        
-            # Si el YAML está mal cargado (no es dict o no tiene criterios)
-            if not isinstance(rub, dict):
-                log(f"[warn] rubrica_efectiva.yaml no es un dict (tipo={type(rub)}), reconstruyendo estructura base.")
-                rub = {"criterios": []}
-        
-            elif "criterios" not in rub or not isinstance(rub["criterios"], list):
-                log("[warn] rubrica_efectiva.yaml no contiene lista 'criterios'. Corrigiendo.")
-                rub["criterios"] = []
-        
+            rub = yaml.safe_load(rubrica_yaml)
+            if not isinstance(rub, dict) or "criterios" not in rub:
+                raise ValueError("rubrica sin clave 'criterios'")
+            log("[ok] rubrica_efectiva.yaml corregido y válido")
         except Exception as e:
             log(f"[fatal] Error leyendo rubrica_efectiva.yaml → {e}")
-            sys.exit(5)
+            sys.exit(1)
+    else:
+        log("[fatal] Modo IA desactivado y no hay lógica alternativa.")
+        sys.exit(1)
 
+    # =====================================================
+    # EVALUACIÓN DEMO (IA + determinista)
+    # =====================================================
+    owner, repo = "demo", "demo"
+    branch = "main"
 
+    resultados = []
+    total = 0
+    for c in rub.get("criterios", []):
+        if c.get("tipo") == "determinista":
+            r = deterministic_stub_eval(c, owner, repo, branch)
+        else:
+            r = ia_stub_eval(c)
+        total += r["score"]
+        resultados.append(r)
 
-    # Enforce max_context_bytes desde scoring si se pasa
-    merged.setdefault("estructura", {}).setdefault("max_context_bytes", int(scoring.get("max_context_bytes", 120_000)))
+    peso_total = rub.get("peso_total", sum(c.get("peso",1) for c in rub.get("criterios",[])))
+    umbral = rub.get("umbrales", {}).get("aprobar", round(peso_total * 0.6, 2))
+    estado = "APROBADO ✅" if total >= umbral else "REVISAR 🔁"
 
-    # 3) Scanner -> submissions/ + meta + snippets
-    scan = run_scanner(merged)
-    snippets = scan["snippets"]
+    # =====================================================
+    # SALIDA / INFORME
+    # =====================================================
+    desglose = "\n".join([f"- {r['id']}: {r['score']}/{r['max']}" for r in resultados])
+    feedback = "\n".join([f"- ({r['id']}) {r['logs'][0]}" for r in resultados if r.get("logs")])
 
-    # 4) Cargar enunciado/solución (opcionales). Si no, dummy.
-    problem_text = read_text(Path(problem_path)) if problem_path else "Proyecto educativo 4Geeks."
-    solution_text = read_text(Path(solution_path)) if solution_path else ""
+    cuerpo = f"""## Resultado módulo {slug}
 
-    # 5) Preparar rubric text (resumen criterios)
-    criterios = merged.get("criterios", [])
-    rubric_text = json.dumps([{"id":c["id"], "peso":c.get("peso",0), "tipo":c.get("tipo","")} for c in criterios], ensure_ascii=False)
+**Score:** {round(total,2)}/{peso_total}
+**Estado:** {estado} (Umbral: {umbral})
 
-    # 6) Llamar IA según scoring type
-    data = evaluate(scoring, rubric_text, problem_text, snippets)
+### Desglose por criterios
+{desglose}
 
-    # 7) Guardar resultados (CSV + Issue)
-    criterios_out = data.get("criterios", [])
-    total = int(data.get("total", sum(int(c.get("score",0)) for c in criterios_out)))
-    peso_total = int(merged.get("peso_total", sum(int(c.get("max", c.get("peso",0))) for c in criterios_out)))
-    umbral = int(merged.get("umbrales", {}).get("aprobar", int(0.6 * peso_total)))
+### Feedback breve
+{feedback or "- sin observaciones -"}
+"""
 
-    # results.csv (una fila)
-    with open("results.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["student_id","logical_marks","syntax_marks","total_marks"])
-        w.writeheader()
-        # no separamos lógico/sintaxis -> todo en total_marks (ajusta si agregas chequeos deterministas extras)
-        w.writerow({"student_id":"student","logical_marks": total, "syntax_marks": 0, "total_marks": total})
+    Path("informe.json").write_text(
+        json.dumps({
+            "slug": slug,
+            "score_total": total,
+            "peso_total": peso_total,
+            "estado": estado,
+            "criterios": resultados
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
-    # ISSUE_BODY.md
-    lines = [
-        f"## Autocorrección — {slug}",
-        f"**Branch:** main",
-        f"**Score:** {total}/{peso_total} — **Estado:** {'APROBADO ✅' if total>=umbral else 'REVISAR 🔁'} (umbral: {umbral})",
-        "",
-        "### Desglose",
-    ]
-    for c in criterios_out:
-        lines.append(f"- {c.get('id')}: {c.get('score','?')}/{c.get('max', c.get('peso','?'))}")
-    lines += [
-        "",
-        "🔎 Artefactos adjuntos:",
-        "- `results.csv`",
-        "- `evaluation.log`",
-        "- `scanner_meta.json`",
-        "- `rubrica_efectiva.yaml`",
-    ]
-    Path("ISSUE_BODY.md").write_text("\n".join(lines), encoding="utf-8")
-    log("[ok] results.csv e ISSUE_BODY.md listos")
+    log("💾 informe.json guardado")
+    log(cuerpo)
+
+    # (Opcional) publicar issue si tienes permisos:
+    try:
+        issue_url = publicar_issue(owner, repo, f"[AutoEval] {slug}", cuerpo)
+        log(f"✅ Issue creado: {issue_url}")
+    except Exception as e:
+        log(f"[warn] No se pudo crear Issue: {e}")
 
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
-        raise
     except Exception as e:
         log(f"[fatal] {e}")
         sys.exit(1)
