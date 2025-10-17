@@ -161,7 +161,8 @@ PY
           rubric-grader rubrica_efectiva.yaml solution.txt problem.txt submissions \
             --scoring_type "$STYPE" \
             --output_csv results.csv \
-            --log_file evaluation.log
+            --log_file evaluation.log \
+            --model gpt-5-nano
 
       - name: Crear/actualizar Issue (idempotente por slug + main@sha)
         env:
