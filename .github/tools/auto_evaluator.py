@@ -171,7 +171,7 @@ def main():
     log(f"[info] slug={slug} ref={ref} stype={scoring.get('type','A')} model={scoring.get('model','gpt-5-nano')}")
 
     use_llm = os.getenv("USE_LLM_RUBRIC","0") == "1"
-
+    
     # =====================================================
     # GENERAR RUBRICA EFECTIVA (IA)
     # =====================================================
@@ -191,7 +191,9 @@ def main():
         }
 
         learn_meta = {"slug": slug, "scoring": scoring}
-
+        print("[debug] module:", len(yaml_texts["module"]), "bytes")
+        print("[debug] stack:", len(yaml_texts["stack"]), "bytes")
+        print("[debug] global:", len(yaml_texts["global"]), "bytes")
         rubrica_yaml = generate_effective_rubric_from_yamls(
             scoring.get("model","gpt-5-nano"), slug, learn_meta, yaml_texts
         )
