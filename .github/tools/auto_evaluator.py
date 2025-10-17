@@ -64,10 +64,13 @@ def parse_repo(repo_url: str):
 # BLOQUE IA PARA FUSIÓN DE YAMLs
 # =====================================================
 
+
 def _openai_chat_llm(model: str, messages, temperature=0.2) -> str:
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("KLAUS")
+    api_key = os.getenv("KLAUS")
     if not api_key:
-        raise RuntimeError("❌ Falta OPENAI_API_KEY o KLAUS")
+        raise RuntimeError("❌ Falta KLAUS")
+    print("[debug] model:", model)
+    print("[debug] body_json:", json.dumps(body, ensure_ascii=False)[:800])
     req = urllib.request.Request("https://api.openai.com/v1/chat/completions")
     req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Content-Type", "application/json")
