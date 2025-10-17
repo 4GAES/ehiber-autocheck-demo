@@ -63,20 +63,42 @@ jobs:
         run: |
           python .github/tools/auto_evaluator.py
 
-      - name: Crear/actualizar Issue (por SHA)
+      - name: Ensure labels exist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          ensure_label() {
+            local name="$1"; local color="${2:-C5DEF5}"; local desc="${3:-Auto label}"
+            if ! gh label list --limit 200 --json name --jq '.[].name' | grep -Fxq "$name"; then
+              gh label create "$name" --color "$color" --description "$desc" || true
+            fi
+          }
+          # Creamos solo labels estables (evita spam de miles de etiquetas)
+          ensure_label "autocorreccion" "FBCA04" "Corrección automática"
+          ensure_label "slug:instagram-feed-bootstrap" "0E8A16" "Proyecto"
+          ensure_label "branch:main" "1D76DB" "Rama"
+
+      - name: Crear/actualizar Issue (por SHA en el título)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
           SHA_SHORT=$(git rev-parse --short HEAD)
           TITLE="[AutoCorrección] instagram-feed-bootstrap - main@${SHA_SHORT}"
-          LABELS="autocorreccion,slug:instagram-feed-bootstrap,branch:main,sha:${SHA_SHORT}"
+          LABELS="autocorreccion,slug:instagram-feed-bootstrap,branch:main"
+      
+          # ¿ya existe este exacto?
           existing=$(gh issue list --limit 100 --search "$TITLE in:title" --json number --jq '.[0].number' || true)
-          if [ -n "$existing" ]; then
+      
+          if [ -n "${existing:-}" ]; then
             gh issue edit "$existing" --add-label "$LABELS" --body-file ISSUE_BODY.md
           else
-            # cerrar issues previos del mismo slug en main
-            old=$(gh issue list --limit 100 --search "[AutoCorrección] instagram-feed-bootstrap - main@ in:title" --json number,title --jq '.[] | select(.title != "'"$TITLE"'") | .number')
-            for n in $old; do gh issue close "$n" --comment "Nueva entrega detectada (main@${SHA_SHORT})."; done
+            # cerramos issues previos abiertos del mismo slug/branch
+            old=$(gh issue list --limit 100 --search "[AutoCorrección] instagram-feed-bootstrap - main@ in:title state:open" --json number,title --jq '.[] | select(.title != "'"$TITLE"'") | .number' || true)
+            for n in $old; do
+              gh issue close "$n" --comment "Nueva entrega detectada (main@${SHA_SHORT})."
+            done
             gh issue create --title "$TITLE" --label "$LABELS" --body-file ISSUE_BODY.md
           fi
 
