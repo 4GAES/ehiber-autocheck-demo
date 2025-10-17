@@ -34,7 +34,7 @@ jobs:
 
       - name: Run evaluator (GPT-5 nano)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          KLAUS: ${{ secrets.KLAUS }}
           # payload: pasa la cadena desde tu backend o edítalo aquí:
           CLIENT_PAYLOAD_JSON: >-
             {
