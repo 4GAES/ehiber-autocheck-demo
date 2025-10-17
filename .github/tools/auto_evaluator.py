@@ -401,6 +401,24 @@ def main():
         log("[ok] rubrica_efectiva.yaml generado")
         # Llamada directa
         limpiar_yml("rubrica_efectiva.yaml")
+        # === Validación robusta de rubrica_efectiva.yaml ===
+        try:
+            with open("rubrica_efectiva.yaml", "r", encoding="utf-8") as f:
+                rub = yaml.safe_load(f)
+        
+            # Si el YAML está mal cargado (no es dict o no tiene criterios)
+            if not isinstance(rub, dict):
+                log(f"[warn] rubrica_efectiva.yaml no es un dict (tipo={type(rub)}), reconstruyendo estructura base.")
+                rub = {"criterios": []}
+        
+            elif "criterios" not in rub or not isinstance(rub["criterios"], list):
+                log("[warn] rubrica_efectiva.yaml no contiene lista 'criterios'. Corrigiendo.")
+                rub["criterios"] = []
+        
+        except Exception as e:
+            log(f"[fatal] Error leyendo rubrica_efectiva.yaml → {e}")
+            sys.exit(5)
+
 
 
     # Enforce max_context_bytes desde scoring si se pasa
