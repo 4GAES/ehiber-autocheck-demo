@@ -19,6 +19,30 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 import yaml, re
 
+def limpiar_yml(file_path: str):
+    """Convierte JSON válido a YAML si el archivo fue generado con comillas."""
+    try:
+        txt = Path(file_path).read_text(encoding="utf-8").strip()
+        # Detectar si es JSON disfrazado
+        if txt.startswith("{") and '"' in txt:
+            log("[warn] rubrica_efectiva.yaml parece JSON — convirtiendo a YAML limpio.")
+            data = json.loads(txt)
+            Path(file_path).write_text(
+                yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                encoding="utf-8"
+            )
+        else:
+            # Si hay claves con comillas tipo `"criterios":` → limpiarlas
+            fixed = re.sub(r'"([a-zA-Z0-9_]+)"\s*:', r'\1:', txt)
+            Path(file_path).write_text(fixed, encoding="utf-8")
+        # Validar que ahora cargue
+        yaml.safe_load(Path(file_path).read_text(encoding="utf-8"))
+        log("[ok] rubrica_efectiva.yaml corregido y válido")
+    except Exception as e:
+        log(f"[fatal] Error limpiando rubrica_efectiva.yaml → {e}")
+        sys.exit(4)
+
+
 def validar_yml(filepath: str) -> bool:
     """Verifica que el YAML sea legible. Si detecta problemas comunes, intenta corregirlos."""
     try:
@@ -375,9 +399,9 @@ def main():
             merged = deep_merge(data, merged)
         Path("rubrica_efectiva.yaml").write_text(yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8")
         log("[ok] rubrica_efectiva.yaml generado")
-        if not validar_yml("rubrica_efectiva.yaml"):
-            log("[fatal] Error al validar rubrica_efectiva.yaml, deteniendo flujo.")
-            sys.exit(3)
+        # Llamada directa
+        limpiar_yml("rubrica_efectiva.yaml")
+
 
     # Enforce max_context_bytes desde scoring si se pasa
     merged.setdefault("estructura", {}).setdefault("max_context_bytes", int(scoring.get("max_context_bytes", 120_000)))
